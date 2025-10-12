@@ -15,7 +15,8 @@
  */
 
 #pragma once
-typedef long long int64_t;
+#include <stdio.h>
+#include <cstdint>
 
 #define CUDA_CHECK(cmd)                                             \
   do {                                                              \
