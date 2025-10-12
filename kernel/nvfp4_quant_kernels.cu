@@ -65,8 +65,6 @@ template void invokeFP4Quantization(int m, int n, __nv_bfloat16 const* input,
                                     int multiProcessorCount,
                                     cudaStream_t stream);
 
-}  // namespace vllm
-
 void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
@@ -92,9 +90,10 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
   bool useUE8M0 = false;
 
   VLLM_DISPATCH_HALF_TYPES(input.scalar_type(), "nvfp4_quant_kernel", [&] {
-    using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
+    using cuda_type = CUDATypeConverter<scalar_t>::Type;
     auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-    vllm::invokeFP4Quantization(m, n, input_ptr, input_sf_ptr, output_ptr,
+    invokeFP4Quantization(m, n, input_ptr, input_sf_ptr, output_ptr,
                                 sf_out, useUE8M0, multiProcessorCount, stream);
   });
 }
+}  // namespace vllm
