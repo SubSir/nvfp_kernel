@@ -17,7 +17,7 @@
 #include <torch/all.h>
 
 #include "nvfp4_scaled_mm_entry.h"
-#include "nvfp4_scaled_mm_sm120_kernels.h"
+#include "nvfp4_scaled_mm_sm120.h"
 #define ENABLE_NVFP4_SM120 1
 
 void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor const& A,

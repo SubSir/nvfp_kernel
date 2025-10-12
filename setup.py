@@ -10,13 +10,13 @@ setup(
         CUDAExtension(
             name="scaled_fp4_ops",
             sources=["binding.cpp", *glob.glob("kernel/*.cu")],
-            include_dirs=["kernel/", os.path.join(home, "cutlass", "include")],
+            include_dirs=["kernel/", os.path.join(home, "cutlass", "include"), os.path.join(home, "cutlass", "tools/util/include")],
             extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
+                "cxx": ["-O3", "-std=c++17","-D_GLIBCXX_USE_CXX11_ABI=0"],
                 "nvcc": [
                     "-O3",
                     "--use_fast_math",
-                    "-gencode=arch=compute_100,code=sm_120",
+                    "-gencode=arch=compute_120a,code=sm_120a"
                 ],
             },
         )

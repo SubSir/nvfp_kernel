@@ -1,5 +1,5 @@
 import torch
-
+import scaled_fp4_ops
 
 def scaled_fp4_quant(
     input: torch.Tensor, input_global_scale: torch.Tensor
@@ -52,7 +52,7 @@ def scaled_fp4_quant(
         (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
     )
 
-    torch.ops._C.scaled_fp4_quant(output, input, output_scale, input_global_scale)
+    scaled_fp4_ops.scaled_fp4_quant_sm1xxa(output, input, output_scale, input_global_scale)
     output_scale = output_scale.view(torch.float8_e4m3fn)
     return output, output_scale
 
@@ -68,5 +68,5 @@ def cutlass_scaled_fp4_mm(
     assert a.ndim == 2 and b.ndim == 2
     m, n = a.shape[0], b.shape[0]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-    torch.ops._C.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b, alpha)
+    scaled_fp4_ops.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b, alpha)
     return out

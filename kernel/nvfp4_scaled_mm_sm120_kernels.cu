@@ -25,6 +25,7 @@
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
+#include "cutlass/util/packed_stride.hpp"
 #include "nvfp4_scaled_mm_sm120.h"
 
 using namespace std;
@@ -40,6 +41,13 @@ using namespace cute;
   CHECK_TH_CUDA(x, m);        \
   CHECK_CONTIGUOUS(x, m);     \
   CHECK_TYPE(x, st, m)
+
+#define CUTLASS_CHECK(status)                       \
+  {                                                 \
+    cutlass::Status error = status;                 \
+    TORCH_CHECK(error == cutlass::Status::kSuccess, \
+                cutlassGetStatusString(error));     \
+  }
 
 inline constexpr uint32_t next_pow_2(uint32_t const num) {
   if (num <= 1) return num;
