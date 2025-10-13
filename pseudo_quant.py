@@ -38,7 +38,6 @@ def float_value(n_bit, signed=True):
 
     return torch.tensor(values)
 def nvfp4_pseudo_quant(tensor_value: torch.Tensor):  
-    dtype = tensor_value.dtype
     tensor_value = tensor_value.float()
     org_shape = tensor_value.shape  
     quant_grid = float_value(4).to(tensor_value.device).float()  
@@ -48,7 +47,6 @@ def nvfp4_pseudo_quant(tensor_value: torch.Tensor):
     # Reshape to process blocks  
     tensor_value = tensor_value.reshape(-1, q_group_size)  
     max_val = tensor_value.abs().amax(dim=1, keepdim=True)  
-    max_val = max_val.clamp(min=1e-5)  
   
     max_quant_val = max(quant_grid)  
     assert torch.isinf(max_val).sum() == 0  
@@ -67,4 +65,4 @@ def nvfp4_pseudo_quant(tensor_value: torch.Tensor):
     labels = ((tensor_value / scales).unsqueeze(-1) - quant_grid).abs().argmin(dim=-1)  
     tensor_deq = quant_grid[labels] * scales  
       
-    return tensor_deq.reshape(org_shape).to(dtype)
+    return tensor_deq.reshape(org_shape).float()
