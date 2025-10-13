@@ -57,12 +57,18 @@ def nvfp4_pseudo_quant(tensor_value: torch.Tensor):
     # Use a global scaling factor to scale the scales
     global_scale = scales.max() / 448.0
     scales = scales / global_scale
-    scales = scales.clamp(min=0.001953125, max=448.0)  
-    scales = scales.to(torch.float8_e4m3fn).to(tensor_value.dtype)
-    scales = scales * global_scale
-      
-    # Quantize using the scaled values  
-    labels = ((tensor_value / scales).unsqueeze(-1) - quant_grid).abs().argmin(dim=-1)  
-    tensor_deq = quant_grid[labels] * scales  
-      
+    scales = scales.clamp(max=448.0)  
+
+    scales_quantized = scales.to(torch.float8_e4m3fn).to(tensor_value.dtype) * global_scale
+
+    zero_scale_mask = (scales_quantized.squeeze(-1) == 0)
+
+    scales_for_div = scales_quantized.clone()
+    scales_for_div[zero_scale_mask] = 1.0  
+
+    labels = ((tensor_value / scales_for_div).unsqueeze(-1) - quant_grid).abs().argmin(dim=-1)  
+    tensor_deq = quant_grid[labels] * scales_quantized
+
+    tensor_deq[zero_scale_mask] = 0.0
+
     return tensor_deq.reshape(org_shape).float()
