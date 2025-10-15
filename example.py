@@ -3,10 +3,10 @@ import ops
 import pseudo_quant
 
 # Input tensors
-a = torch.randn(64, 32, dtype=torch.bfloat16, device="cuda")
+a = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
 
 # Create tensor b with the last dimension having first 32 elements as 1 and last 32 as 0
-b = torch.randn(64, 32, dtype=torch.bfloat16, device="cuda")
+b = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
 
 
 # Quantize weight to NVFP4
@@ -31,4 +31,4 @@ output = ops.cutlass_scaled_fp4_mm(
 
 print(output)
 
-print(pseudo_quant.nvfp4_pseudo_quant(a) @ pseudo_quant.nvfp4_pseudo_quant(b).T)
+print(pseudo_quant.nvfp4_pseudo_quantize(a) @ pseudo_quant.nvfp4_pseudo_quantize(b).T)
