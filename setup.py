@@ -1,11 +1,13 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import os, glob
 
 home = os.path.expanduser("~")
 
 setup(
-    name="scaled_fp4_ops",
+    name="nvfp",
+    version="0.1.0",
+    packages=find_packages(),
     ext_modules=[
         CUDAExtension(
             name="scaled_fp4_ops",
@@ -22,4 +24,8 @@ setup(
         )
     ],
     cmdclass={"build_ext": BuildExtension},
+    install_requires=[
+        "torch>=2.8.0",
+    ],
+    python_requires=">=3.8",
 )

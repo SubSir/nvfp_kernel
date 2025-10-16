@@ -1,6 +1,6 @@
 import torch
-import ops
-import pseudo_quant
+import nvfp.ops as ops
+import nvfp.pseudo_quant as pseudo_quant
 
 # Input tensors
 a = torch.randn(128, 128, dtype=torch.bfloat16, device="cuda")
