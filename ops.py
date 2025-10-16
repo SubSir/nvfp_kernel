@@ -23,6 +23,8 @@ def scaled_fp4_quant(
             in the sizzled layout.
     """
     # assert not current_platform.is_rocm()
+    assert input.is_cuda, "input must be a CUDA tensor"
+    assert input_global_scale.is_cuda, "input_global_scale must be a CUDA tensor"
     assert input.ndim >= 1, f"input.ndim needs to be >= 1, but got {input.ndim}."
     other_dims = 1 if input.ndim == 1 else -1
     input = input.reshape(other_dims, input.shape[-1])
@@ -65,6 +67,11 @@ def cutlass_scaled_fp4_mm(
     alpha: torch.Tensor,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
+    assert a.is_cuda, "a must be a CUDA tensor"
+    assert b.is_cuda, "b must be a CUDA tensor"
+    assert block_scale_a.is_cuda, "block_scale_a must be a CUDA tensor"
+    assert block_scale_b.is_cuda, "block_scale_b must be a CUDA tensor"
+    assert alpha.is_cuda, "alpha must be a CUDA tensor"
     assert a.ndim == 2 and b.ndim == 2
     m, n = a.shape[0], b.shape[0]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)

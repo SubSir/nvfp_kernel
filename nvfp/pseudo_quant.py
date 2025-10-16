@@ -100,43 +100,52 @@ def quantize_linear_weight_to_nvfp4(
 
 
 # Ref: https://github.com/NVIDIA/Fuser/blob/d70540f9/tests/python/utils/narrow_precision.py#L13-L22
-kE2M1ToFloatArray = [
-    0.0,
-    0.5,
-    1.0,
-    1.5,
-    2.0,
-    3.0,
-    4.0,
-    6.0,
-]
+kE2M1ToFloatTensor = torch.tensor(
+    [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+    ],
+    dtype=torch.float32,
+    device="cuda",
+)
 
 
 # Ref: https://github.com/NVIDIA/Fuser/blob/d70540f9/tests/python/utils/narrow_precision.py#L25-L32
 # Convert FP4 into FP32
-def e2m1_to_fp32(int4_value):
-    signBit = int4_value & 0x8
-    int4_absValue = int4_value & 0x7
-    float_result = kE2M1ToFloatArray[int4_absValue]
-    if signBit:
-        float_result = -float_result
-    return float_result
+def e2m1_to_fp32_vectorized(int4_values):
+    """
+    Vectorized version of e2m1_to_fp32.
+    int4_values: tensor of uint8, each element in [0, 15]
+    """
+    sign_bits = int4_values & 0x8  # shape: (...)
+    abs_indices = int4_values & 0x7  # values in [0, 7]
+    abs_indices = abs_indices.to(torch.int64)
+
+    float_vals = kE2M1ToFloatTensor[abs_indices]  # shape same as int4_values
+
+    float_vals = torch.where(sign_bits != 0, -float_vals, float_vals)
+    return float_vals
 
 
 # Ref: https://github.com/NVIDIA/Fuser/blob/d70540f9/tests/python/utils/narrow_precision.py#L35-L49
 # Unpack float4_e2m1fn_x2 into two separate fp32 values
-def unpack_fp4_bytes(a, dtype):
+def unpack_fp4_bytes(a):
     assert a.dtype == torch.float4_e2m1fn_x2
     m, n = a.shape
-    a = a.view(torch.uint8).flatten()
-    upper_half_byte = (a & 0xF0) >> 4
-    lower_half_byte = a & 0x0F
-    upper_half_float = torch.tensor([e2m1_to_fp32(x) for x in upper_half_byte]).to(
-        a.device
-    )
-    lower_half_float = torch.tensor([e2m1_to_fp32(x) for x in lower_half_byte]).to(
-        a.device
-    )
+    a = a.view(torch.uint8).flatten()  # shape: (m * n,)
+
+    upper_half_byte = (a & 0xF0) >> 4  # high 4 bits
+    lower_half_byte = a & 0x0F  # low 4 bits
+
+    upper_half_float = e2m1_to_fp32_vectorized(upper_half_byte)
+    lower_half_float = e2m1_to_fp32_vectorized(lower_half_byte)
+
     out = torch.stack((lower_half_float, upper_half_float), dim=-1).reshape(m, n * 2)
     return out
 
@@ -162,7 +171,7 @@ def dequantize_to_dtype(
     assert tensor_fp4.dtype == torch.float4_e2m1fn_x2
     m, packed_k = tensor_fp4.shape
     k = packed_k * 2
-    tensor_f32 = unpack_fp4_bytes(tensor_fp4, dtype)
+    tensor_f32 = unpack_fp4_bytes(tensor_fp4)
     tensor_f32 = tensor_f32.reshape(m, k // block_size, block_size)
     tensor_sf = tensor_sf.view(torch.float8_e4m3fn)
     tensor_sf = swizzled_to_linear_128_4(tensor_sf, m, k)
@@ -174,6 +183,15 @@ def dequantize_to_dtype(
 
 
 def nvfp4_pseudo_quantize(x: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda, "x must be a CUDA tensor"
+    assert x.dtype in (
+        torch.float16,
+        torch.bfloat16,
+    ), f"x.dtype needs to be fp16 or bf16 but got {x.dtype}"
+    assert x.ndim >= 1, f"x.ndim needs to be >= 1, but got {x.ndim}"
+    assert x.shape[-1] % 16 == 0, f"last dim has to be multiple of 16, but got {x.shape[-1]}"
+    org_shape = x.shape
+    x = x.reshape(-1, org_shape[-1])
     fp4_weight, weight_scale_interleaved, weight_global_scale = (
         quantize_linear_weight_to_nvfp4(x)
     )
@@ -185,4 +203,4 @@ def nvfp4_pseudo_quantize(x: torch.Tensor) -> torch.Tensor:
         x.device,
         16,
     )
-    return quantized_x
+    return quantized_x.reshape(org_shape)
