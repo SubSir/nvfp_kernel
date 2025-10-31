@@ -182,6 +182,41 @@ def dequantize_to_dtype(
     return out
 
 
+def simple_fp4_pseudo_quantize(x: torch.Tensor) -> torch.Tensor:
+    """
+    Simple pseudo-quantization that converts float/float16/bfloat16 to FP4 and back to original dtype.
+    This function does NOT handle scales - it's a simple quantize-dequantize operation.
+
+    Args:
+        x: Input tensor with dtype float, float16, or bfloat16
+
+    Returns:
+        Tensor with same shape and dtype as input, but with values pseudo-quantized through FP4
+    """
+    assert x.is_cuda, "x must be a CUDA tensor"
+    assert x.dtype in (
+        torch.float,
+        torch.float16,
+        torch.bfloat16,
+    ), f"x.dtype needs to be float, fp16 or bf16 but got {x.dtype}"
+    assert x.ndim >= 2, f"x.ndim needs to be >= 1, but got {x.ndim}"
+    assert (
+        x.shape[-1] % 2 == 0
+    ), f"last dim has to be multiple of 2, but got {x.shape[-1]}"
+
+    original_shape = x.shape
+    original_dtype = x.dtype
+
+    # Convert to FP4
+    x_fp4 = to_fp4(x.reshape(-1, original_shape[-1]))
+
+    # Convert back to float32 first
+    x_dequantized = unpack_fp4_bytes(x_fp4)
+
+    # Cast back to original dtype
+    return x_dequantized.to(original_dtype).reshape(original_shape)
+
+
 def nvfp4_pseudo_quantize(x: torch.Tensor) -> torch.Tensor:
     assert x.is_cuda, "x must be a CUDA tensor"
     assert x.dtype in (
@@ -189,7 +224,9 @@ def nvfp4_pseudo_quantize(x: torch.Tensor) -> torch.Tensor:
         torch.bfloat16,
     ), f"x.dtype needs to be fp16 or bf16 but got {x.dtype}"
     assert x.ndim >= 1, f"x.ndim needs to be >= 1, but got {x.ndim}"
-    assert x.shape[-1] % 16 == 0, f"last dim has to be multiple of 16, but got {x.shape[-1]}"
+    assert (
+        x.shape[-1] % 16 == 0
+    ), f"last dim has to be multiple of 16, but got {x.shape[-1]}"
     org_shape = x.shape
     x = x.reshape(-1, org_shape[-1])
     fp4_weight, weight_scale_interleaved, weight_global_scale = (
