@@ -83,7 +83,7 @@ def linear_to_swizzled_128_4(a_sf_linear: torch.Tensor):
     # details about layout requirement on block-wise scaling factor
     # https://docs.nvidia.com/cutlass/media/docs/cpp/blackwell_functionality.html#scale-factor-layouts
     tmp = torch.reshape(a_sf_padded, (m_tiles, 4, 32, k_tiles, 4))
-    return tmp.transpose(1, 3).reshape(mn_padded, k_padded)[:mn, :sf_k]
+    return tmp.transpose(1, 3).reshape(mn_padded, k_padded)
 
 
 @torch.inference_mode()
@@ -163,9 +163,7 @@ def swizzled_to_linear_128_4(a_sf_swizzled: torch.Tensor, mn, k):
 
 
 # Ref: https://github.com/NVIDIA/Fuser/blob/d70540f9/tests/python/utils/narrow_precision.py#L85-L101
-def dequantize_to_dtype(
-    tensor_fp4, tensor_sf, global_scale, dtype, device, block_size=16
-):
+def dequantize_to_dtype(tensor_fp4, tensor_sf, global_scale, block_size=16):
     """Dequantize the fp4 tensor back to high precision."""
     # Two fp4 values are packed into one uint8.
     assert tensor_fp4.dtype == torch.float4_e2m1fn_x2
@@ -184,14 +182,17 @@ def dequantize_to_dtype(
 
 def simple_fp4_pseudo_quantize(x: torch.Tensor) -> torch.Tensor:
     """
-    Simple pseudo-quantization that converts float/float16/bfloat16 to FP4 and back to original dtype.
+    Simple pseudo-quantization that converts float/float16/bfloat16 to FP4 and back to float32.
     This function does NOT handle scales - it's a simple quantize-dequantize operation.
 
     Args:
-        x: Input tensor with dtype float, float16, or bfloat16
+        x: Input tensor with dtype float, float16, or bfloat16. Must be a CUDA tensor
+           with at least 2 dimensions and last dimension divisible by 2.
 
     Returns:
-        Tensor with same shape and dtype as input, but with values pseudo-quantized through FP4
+        torch.Tensor: Dequantized tensor with float32 dtype, same shape as input.
+                     The tensor is quantized to FP4 and then dequantized back to float32,
+                     simulating the precision loss of FP4 quantization.
     """
     assert x.is_cuda, "x must be a CUDA tensor"
     assert x.dtype in (
@@ -205,7 +206,6 @@ def simple_fp4_pseudo_quantize(x: torch.Tensor) -> torch.Tensor:
     ), f"last dim has to be multiple of 2, but got {x.shape[-1]}"
 
     original_shape = x.shape
-    original_dtype = x.dtype
 
     # Convert to FP4
     x_fp4 = to_fp4(x.reshape(-1, original_shape[-1]))
@@ -214,15 +214,37 @@ def simple_fp4_pseudo_quantize(x: torch.Tensor) -> torch.Tensor:
     x_dequantized = unpack_fp4_bytes(x_fp4)
 
     # Cast back to original dtype
-    return x_dequantized.to(original_dtype).reshape(original_shape)
+    return x_dequantized.reshape(original_shape)
 
 
 def nvfp4_pseudo_quantize(x: torch.Tensor) -> torch.Tensor:
+    """
+    NVIDIA FP4 pseudo-quantization that converts float/float16/bfloat16 to NVFP4 and back to float32.
+    This function uses block-wise scaling with swizzled scale factors for optimal performance.
+
+    The quantization process includes:
+    1. Block-wise scaling (block size = 16) to preserve precision
+    2. Global scaling to fit within FP4 range
+    3. Swizzled scale factor layout for efficient memory access
+    4. FP4 quantization using E2M1 format
+    5. Dequantization back to float32
+
+    Args:
+        x: Input tensor with dtype float, float16, or bfloat16. Must be a CUDA tensor
+           with at least 1 dimension and last dimension divisible by 16.
+
+    Returns:
+        torch.Tensor: Dequantized tensor with float32 dtype, same shape as input.
+                     The tensor undergoes NVFP4 quantization with block-wise scaling
+                     and is then dequantized back to float32, providing a realistic
+                     simulation of NVFP4 precision loss and scaling effects.
+    """
     assert x.is_cuda, "x must be a CUDA tensor"
     assert x.dtype in (
+        torch.float,
         torch.float16,
         torch.bfloat16,
-    ), f"x.dtype needs to be fp16 or bf16 but got {x.dtype}"
+    ), f"x.dtype needs to be float, fp16 or bf16 but got {x.dtype}"
     assert x.ndim >= 1, f"x.ndim needs to be >= 1, but got {x.ndim}"
     assert (
         x.shape[-1] % 16 == 0
@@ -236,8 +258,6 @@ def nvfp4_pseudo_quantize(x: torch.Tensor) -> torch.Tensor:
         fp4_weight,
         weight_scale_interleaved,
         weight_global_scale,
-        x.dtype,
-        x.device,
         16,
     )
     return quantized_x.reshape(org_shape)
