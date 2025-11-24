@@ -173,7 +173,7 @@ def dequantize_to_dtype(tensor_fp4, tensor_sf, global_scale, block_size=16):
     tensor_f32 = tensor_f32.reshape(m, k // block_size, block_size)
     tensor_sf = tensor_sf.view(torch.float8_e4m3fn)
     tensor_sf = swizzled_to_linear_128_4(tensor_sf, m, k)
-    tensor_sf_dtype = tensor_sf.to(torch.float32) / global_scale
+    tensor_sf_dtype = tensor_sf.to(torch.double) / global_scale
 
     # scale the tensor
     out = (tensor_f32 * tensor_sf_dtype.unsqueeze(-1)).reshape(m, k)
