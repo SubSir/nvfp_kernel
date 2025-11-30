@@ -4,6 +4,10 @@ import nvfp.pseudo_quant as pseudo_quant
 import matplotlib.pyplot as plt
 import numpy as np
 
+torch.manual_seed(23)
+torch.cuda.manual_seed(23)
+torch.cuda.manual_seed_all(23)
+
 # Input tensors
 a = torch.randn(128, 128, dtype=torch.float16, device="cuda")
 
@@ -310,6 +314,157 @@ if total_errors > 0:
         "error_analysis.pt",
     )
     print(f"Error analysis data saved to 'error_analysis.pt'")
+
+    # ---------------------------------------------------
+    # Step 1: Recover A from real C using pseudo B^T inverse
+    # ---------------------------------------------------
+
+    # Use high precision for inversion and recovery
+    a_fp64 = a.to(torch.float64)
+    b_fp64 = b.to(torch.float64)
+    output_fp64 = output.to(torch.float64)  # real quantized C
+
+    # Pseudo-quantized B (same as used in pseudu_output)
+    B_pseudo = pseudo_quant.nvfp4_pseudo_quantize(b).to(
+        torch.float64
+    )  # shape: [128, 128]
+    B_pseudo_T = B_pseudo.t()  # [128, 128]
+
+    # Check condition number to assess invertibility
+    cond_B = torch.linalg.cond(B_pseudo_T)
+    print(f"\nCondition number of pseudo B^T: {cond_B:.2e}")
+    if cond_B > 1e12:
+        print("⚠️ Warning: pseudo B^T is ill-conditioned! Inversion may be unstable.")
+
+    # Compute inverse of B_pseudo^T in float64
+    try:
+        inv_B_pseudo_T = torch.linalg.inv(B_pseudo_T)  # (B^T)^{-1}
+    except torch._C._LinAlgError:
+        print("Failed to invert pseudo B^T. Using pseudo-inverse instead.")
+        inv_B_pseudo_T = torch.linalg.pinv(B_pseudo_T)
+
+    # Recover A from real C: A_recovered = C_real @ (B_pseudo^T)^{-1}
+    A_recovered = output_fp64 @ inv_B_pseudo_T  # [128, 128]
+
+    # Pseudo-quantized A (ground truth for comparison)
+    A_pseudo = pseudo_quant.nvfp4_pseudo_quantize(a).to(torch.float64)
+
+    # Compute difference
+    A_diff = A_recovered - A_pseudo  # [128, 128]
+
+    # Analyze per-row error (L2 norm or max abs)
+    row_errors_l2 = torch.norm(A_diff, dim=1)  # L2 norm per row
+    row_errors_max = torch.max(torch.abs(A_diff), dim=1).values  # max abs per row
+
+    # Find rows with large discrepancies
+    top_k = 10
+    top_l2_rows = torch.topk(row_errors_l2, top_k)
+    top_max_rows = torch.topk(row_errors_max, top_k)
+
+    print("\n=== A Recovery Error Analysis (vs Pseudo A) ===")
+    print("Top 10 rows with largest L2 error:")
+    for i in range(top_k):
+        row_idx = top_l2_rows.indices[i].item()
+        err = top_l2_rows.values[i].item()
+        print(f"  Row {row_idx:3d}: L2 error = {err:.6f}")
+
+    print("\nTop 10 rows with largest max-absolute error:")
+    for i in range(top_k):
+        row_idx = top_max_rows.indices[i].item()
+        err = top_max_rows.values[i].item()
+        print(f"  Row {row_idx:3d}: max |error| = {err:.6f}")
+
+    N = 5
+    group_size = 16
+    assert a.shape[-1] % group_size == 0, "Last dim must be divisible by group_size"
+
+    A_diff_abs = torch.abs(A_recovered - A_pseudo)  # [128, 128]
+    # Reshape to [128, num_groups, group_size]
+    num_groups = A_diff_abs.shape[-1] // group_size
+    A_diff_abs_groups = A_diff_abs.view(A_diff_abs.shape[0], num_groups, group_size)
+    group_max_error = A_diff_abs_groups.max(dim=-1).values  # [128, num_groups]
+
+    row_group_max, argmax_group = group_max_error.max(dim=-1)  # [128]
+    top_rows = torch.topk(row_group_max, N).indices  # top N rows by worst group
+
+    def get_scale(tensor_value):
+        FLOAT8_E4M3_EPS = torch.finfo(torch.float8_e4m3fn).tiny
+        org_shape = tensor_value.shape
+        group_size = 16
+        if group_size > 0:
+            assert org_shape[-1] % group_size == 0
+            tensor_value = tensor_value.reshape(-1, group_size)
+
+        max_val = tensor_value.abs().amax(dim=1, keepdim=True)
+        scales = max_val / FLOAT4_E2M1_MAX
+        # avoid divide a too small value
+        global_scale = scales.max() / FLOAT8_E4M3_MAX
+        scales = (
+            (scales / global_scale)
+            .clamp(min=FLOAT8_E4M3_EPS)
+            .to(torch.float8_e4m3fn)
+            .to(tensor_value.dtype)
+        ) * global_scale
+        return scales
+
+    def value_div_scale(tensor_value, scales):
+        org_shape = tensor_value.shape
+        group_size = 16
+        tensor_value = tensor_value.reshape(-1, group_size)
+        return (
+            (tensor_value / scales.double()).reshape(org_shape).to(tensor_value.dtype)
+        )
+
+    scale = get_scale(a)
+    a_cpu = value_div_scale(a, scale).cpu().float()
+    a_pseudo_cpu = (
+        value_div_scale(pseudo_quant.nvfp4_pseudo_quantize(a), scale).cpu().float()
+    )
+    A_recovered_cpu = value_div_scale(A_recovered, scale).cpu().float()
+    A_pseudo_cpu = value_div_scale(A_pseudo, scale).cpu().float()
+
+    print(f"\n=== Top {N} Rows: Worst Group (size={group_size}) Analysis ===")
+    for i in range(N):
+        row = top_rows[i].item()
+        group_idx = argmax_group[row].item()
+        col_start = group_idx * group_size
+        col_end = col_start + group_size
+
+        orig_group = a_cpu[row, col_start:col_end]
+        pseudo_group = A_pseudo_cpu[row, col_start:col_end]
+        recovered_group = A_recovered_cpu[row, col_start:col_end]
+        diff_group = recovered_group - pseudo_group
+
+        print(
+            f"\nRow {row:3d}, Group {group_idx:2d} (cols {col_start:3d}–{col_end-1:3d}):"
+        )
+        print(f"  orig     = {orig_group.tolist()}")
+        print(f"  pseudo   = {pseudo_group.tolist()}")
+        print(f"  recovered= {recovered_group.tolist()}")
+        print(f"  diff     = {diff_group.tolist()}")
+        print(f"  max|diff|= {diff_group.abs().max().item():.6f}")
+
+    # Optional: visualize A recovery error
+    plt.figure(figsize=(12, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(row_errors_l2.cpu().numpy())
+    plt.title("L2 Error per Row in Recovered A")
+    plt.xlabel("Row Index")
+    plt.ylabel("L2 Norm of Error")
+    plt.grid(True)
+
+    plt.subplot(1, 2, 2)
+    plt.plot(row_errors_max.cpu().numpy())
+    plt.title("Max Absolute Error per Row in Recovered A")
+    plt.xlabel("Row Index")
+    plt.ylabel("Max |Error|")
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.savefig("A_recovery_error_analysis.png", dpi=150, bbox_inches="tight")
+    plt.show()
+    print("\nA recovery error plot saved to 'A_recovery_error_analysis.png'")
 
 else:
     print("No errors found! Real and pseudo quantization produce identical results.")

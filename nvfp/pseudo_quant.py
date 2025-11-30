@@ -3,7 +3,7 @@
 import torch
 from torch.testing._internal.common_quantized import _f32_to_floatx_unpacked
 import torch.nn as nn
-
+from .ops import reciprocal_approximate_ftz_tensor
 
 # Ref: https://github.com/pytorch/pytorch/blob/bffc7dd1/test/test_matmul_cuda.py#L972-L974
 def down_size(size):
@@ -56,8 +56,8 @@ def pytorch_nvfp4_quantize(a, a_global_scale):
         max=FLOAT8_E4M3_MAX,
     ).to(torch.float8_e4m3fn)
     scaled_block_scale_fp8_fp32 = scaled_block_scale_fp8.to(torch.float)
-    total_scale = scaled_block_scale_fp8_fp32 / a_global_scale
-    a_scaled = a_fp32 / total_scale.unsqueeze(-1)
+    total_scale = scaled_block_scale_fp8_fp32 * reciprocal_approximate_ftz_tensor(a_global_scale)
+    a_scaled = a_fp32 * reciprocal_approximate_ftz_tensor(total_scale.unsqueeze(-1))
     a_scaled = torch.clamp(a_scaled, -FLOAT4_E2M1_MAX, FLOAT4_E2M1_MAX)
     a_scaled = a_scaled.view(original_shape)
     return to_fp4(a_scaled), scaled_block_scale_fp8
