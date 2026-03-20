@@ -37,6 +37,7 @@ class EmulationKernel:
         m_chunk_size: int = 128,
         enable_profile: bool = False,
         use_triton_stage3: bool = False,
+        use_triton_stage4: bool = False,
     ):
         """
         Initialize emulation kernel with fixed configuration.
@@ -62,6 +63,7 @@ class EmulationKernel:
         self.m_chunk_size = m_chunk_size
         self.enable_profile = enable_profile
         self.use_triton_stage3 = use_triton_stage3
+        self.use_triton_stage4 = use_triton_stage4
     
     def __call__(
         self,
@@ -121,6 +123,7 @@ class EmulationKernel:
             m_chunk_size=self.m_chunk_size,
             enable_profile=self.enable_profile,
             use_triton_stage3=self.use_triton_stage3,
+            use_triton_stage4=self.use_triton_stage4,
         )
         
         # Cast to requested output dtype

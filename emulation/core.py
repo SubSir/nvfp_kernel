@@ -17,6 +17,13 @@ except Exception:
     triton_stage3_reduce4 = None
     _HAS_TRITON_STAGE3 = False
 
+try:
+    from .triton_stage4 import triton_stage4_add_wbits
+    _HAS_TRITON_STAGE4 = True
+except Exception:
+    triton_stage4_add_wbits = None
+    _HAS_TRITON_STAGE4 = False
+
 
 def _now_cuda_ms():
     if torch.cuda.is_available():
@@ -58,7 +65,7 @@ class HardwareCore:
             raise NotImplementedError(f"Rounding {rounding} not implemented in to_float32_with_rounding")
 
     @staticmethod
-    def hardware_add_wbits(acc_fp32, new_val_wbits, W=25, rounding=RoundStrategy.RZ):
+    def hardware_add_wbits(acc_fp32, new_val_wbits, W=25, rounding=RoundStrategy.RZ, use_triton=False):
         """
         Stage 4: FP32 accumulator + W bits new_val -> FP32 output.
         
@@ -70,18 +77,34 @@ class HardwareCore:
         # Step 1: Align to acc's exponent
         _, acc_exp = torch.frexp(acc_fp32.abs())
         scale = 2.0**(W - acc_exp)
-        
-        # acc is already FP32, convert to fixed-point without truncation
-        acc_aligned = acc_fp32.double() * scale
-        
-        # new_val is W-bits, truncate to align with acc's exponent (fixed hardware behavior)
-        new_val_aligned = torch.trunc(new_val_wbits.double() * scale)
-        
-        # Step 2: Accumulate in fixed-point
-        sum_fixed = acc_aligned + new_val_aligned
-        
-        # Step 3: Convert back to float with specified rounding
-        sum_f64 = sum_fixed / scale
+
+        use_triton_path = (
+            use_triton
+            and _HAS_TRITON_STAGE4
+            and triton_stage4_add_wbits is not None
+            and acc_fp32.is_cuda
+            and new_val_wbits.is_cuda
+            and scale.is_cuda
+        )
+
+        if use_triton_path:
+            triton_stage4_fn = triton_stage4_add_wbits
+            if triton_stage4_fn is None:
+                raise RuntimeError("Triton stage4 kernel is not available")
+            sum_f64 = triton_stage4_fn(acc_fp32, new_val_wbits, scale)
+        else:
+            # acc is already FP32, convert to fixed-point without truncation
+            acc_aligned = acc_fp32.double() * scale
+
+            # new_val is W-bits, truncate to align with acc's exponent (fixed hardware behavior)
+            new_val_aligned = torch.trunc(new_val_wbits.double() * scale)
+
+            # Step 2: Accumulate in fixed-point
+            sum_fixed = acc_aligned + new_val_aligned
+
+            # Step 3: Convert back to float with specified rounding
+            sum_f64 = sum_fixed / scale
+
         return HardwareCore.to_float32_with_rounding(sum_f64, rounding)
 
     @staticmethod
@@ -202,6 +225,7 @@ class MMAEngine:
         m_chunk_size=128,
         enable_profile=False,
         use_triton_stage3=False,
+        use_triton_stage4=False,
     ):
         """NVFP4 MMA Accuracy Emulation with M-dimension chunking to avoid OOM"""
         from .utils import NVFP4Utils
@@ -346,7 +370,11 @@ class MMAEngine:
                     if timing is not None:
                         _profile_begin(timing, "step4.hardware_add_wbits")
                     acc = HardwareCore.hardware_add_wbits(
-                        acc, summed_groups[..., i], W=W_stage4, rounding=stage4_rounding
+                        acc,
+                        summed_groups[..., i],
+                        W=W_stage4,
+                        rounding=stage4_rounding,
+                        use_triton=use_triton_stage4,
                     )
                     if timing is not None:
                         _profile_end(timing, "step4.hardware_add_wbits")
