@@ -38,14 +38,15 @@ def graph_bench(fn, inner=50, iters=50, warmup=5):
     torch.cuda.synchronize()
     e0 = torch.cuda.Event(enable_timing=True)
     e1 = torch.cuda.Event(enable_timing=True)
-    best = float("inf")
+    ts = []
     for _ in range(iters):
         e0.record()
         g.replay()
         e1.record()
         torch.cuda.synchronize()
-        best = min(best, e0.elapsed_time(e1) / inner)
-    return best
+        ts.append(e0.elapsed_time(e1) / inner)
+    import statistics
+    return statistics.mean(ts)
 
 
 def gemm_roofline(rows, K, N, t_ms):
