@@ -7,7 +7,8 @@ achieved tensor throughput (TFLOPS) and the achieved HBM bandwidth under an
 "ideal traffic" model (weight read once + activation + output), each as a % of
 the B200 roofline -- so you can see the memory-bound -> compute-bound crossover.
 
-B200 (GB100) approx peaks: HBM ~8000 GB/s, NVFP4 dense tensor ~4500 TFLOPS.
+B200 (GB100) datasheet peaks: HBM3e 8.0 TB/s, FP4 dense tensor 9 PFLOPS
+(18 PFLOPS with 2:4 sparsity -- we run dense, so 9000 TFLOPS is the ceiling).
 """
 
 import torch
@@ -18,8 +19,8 @@ from nvfp.ops import scaled_fp4_quant, scaled_fp4_quant_residual, cutlass_scaled
 SHAPES = [("qkv_proj", 6144, 9216), ("o_proj", 8192, 6144)]
 MS = [128, 256, 512, 1024, 2048]
 
-HBM_GBPS = 8000.0       # ~8 TB/s
-FP4_TFLOPS = 4500.0     # NVFP4 dense tensor-core peak (approx)
+HBM_GBPS = 8000.0       # B200 HBM3e: 8.0 TB/s (datasheet)
+FP4_TFLOPS = 9000.0     # B200 FP4 dense tensor peak: 9 PFLOPS (18 w/ sparsity)
 
 
 def graph_bench(fn, inner=50, iters=50, warmup=5):
