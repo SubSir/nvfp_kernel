@@ -50,22 +50,30 @@ def main():
     w_q, w_sf = scaled_fp4_quant(w, w_gs)
 
     print(f"# shape qkv_proj K={K} N={N}  (mean +/- std over 60 windows)")
+    print("# full decode path: activation quant + GEMM (+ residual add); weight offline")
     print("# DATA,M,bf16_mean,bf16_std,fp4_mean,fp4_std,resid_mean,resid_std  (ms)")
     for M in MS:
         a = torch.randn(M, K, dtype=torch.bfloat16, device=dev) * 0.5
-        a_gs = global_scale(a)
-        al = (1.0 / (a_gs * w_gs)).to(torch.float32)
-        aq, asf = scaled_fp4_quant(a, a_gs)
-        aqr, asfr = scaled_fp4_quant_residual(a, a_gs)
 
-        tb, sb = graph_bench(lambda: torch.matmul(a, w.t()))
-        tf, sf = graph_bench(lambda: cutlass_scaled_fp4_mm(aq, w_q, asf, w_sf, al, torch.bfloat16))
+        def run_bf16():
+            return torch.matmul(a, w.t())
 
-        def resid():
+        def run_fp4():
+            a_gs = global_scale(a)
+            aq, asf = scaled_fp4_quant(a, a_gs)
+            al = (1.0 / (a_gs * w_gs)).to(torch.float32)
+            return cutlass_scaled_fp4_mm(aq, w_q, asf, w_sf, al, torch.bfloat16)
+
+        def run_resid():
+            a_gs = global_scale(a)
+            aqr, asfr = scaled_fp4_quant_residual(a, a_gs)
+            al = (1.0 / (a_gs * w_gs)).to(torch.float32)
             o2 = cutlass_scaled_fp4_mm(aqr, w_q, asfr, w_sf, al, torch.bfloat16)
             return o2[:M] + o2[M:]
 
-        tr, sr = graph_bench(resid)
+        tb, sb = graph_bench(run_bf16)
+        tf, sf = graph_bench(run_fp4)
+        tr, sr = graph_bench(run_resid)
         print(f"DATA,{M},{tb:.6f},{sb:.6f},{tf:.6f},{sf:.6f},{tr:.6f},{sr:.6f}", flush=True)
 
 
