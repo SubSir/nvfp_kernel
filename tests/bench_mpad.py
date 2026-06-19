@@ -21,7 +21,9 @@ from nvfp.fp4_gemm import global_scale
 from nvfp.ops import scaled_fp4_quant, cutlass_scaled_fp4_mm
 
 SHAPES = [("qkv_proj", 6144, 9216), ("o_proj", 8192, 6144)]
-MS = [16, 32, 48, 64, 72, 96, 128, 192, 256, 384, 512]
+# Exact multiples of the 128-row tile: no padding waste, M and 2M are both
+# whole numbers of tiles, so 2M/M is the pure doubling cost vs grid/wave size.
+MS = [128, 256, 384, 512, 640, 768, 896, 1024, 1280, 1536, 2048]
 
 
 def bench(fn, inner=50, iters=50, warmup=10):
