@@ -3,6 +3,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <cuda_fp4.h>
 #include <cuda_runtime.h>
 
 #include "launch_bounds_utils.h"
@@ -241,19 +242,14 @@ __device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal,
   return e2m1Vec;
 }
 
-// Decode the magnitude of one e2m1 nibble (low 3 bits) to float.
-// e2m1 magnitudes: {0, 0.5, 1, 1.5, 2, 3, 4, 6}.
-inline __device__ float e2m1_mag_to_float(uint32_t idx) {
-  switch (idx & 0x7u) {
-    case 0: return 0.0f;
-    case 1: return 0.5f;
-    case 2: return 1.0f;
-    case 3: return 1.5f;
-    case 4: return 2.0f;
-    case 5: return 3.0f;
-    case 6: return 4.0f;
-    default: return 6.0f;
-  }
+// Decode two packed e2m1 codes (one byte: low nibble -> .x, high nibble -> .y)
+// back to fp32, using the Blackwell hardware converter (cvt.rn.f16x2.e2m1x2).
+// Branch-free and exact -- the decoded values match the e2m1 grid bit-for-bit,
+// so the residual matches what the downstream GEMM consumes.
+inline __device__ float2 e2m1x2_to_float2(uint32_t byte) {
+  __half2_raw raw = __nv_cvt_fp4x2_to_halfraw2(
+      static_cast<__nv_fp4x2_storage_t>(byte & 0xFFu), __NV_E2M1);
+  return __half22float2(*reinterpret_cast<__half2*>(&raw));
 }
 
 // Same as cvt_warp_fp16_to_fp4, but additionally returns the quantization
@@ -320,22 +316,16 @@ __device__ uint32_t cvt_warp_fp16_to_fp4_residual(PackedVec<Type>& vec,
 #pragma unroll
     for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
       // byte i of e2m1Vec packs element 2i (low nibble) and 2i+1 (high nibble).
-      uint32_t nlo = (e2m1Vec >> (8 * i)) & 0xFu;
-      uint32_t nhi = (e2m1Vec >> (8 * i + 4)) & 0xFu;
-      float qlo = e2m1_mag_to_float(nlo) * ((nlo & 0x8u) ? -1.0f : 1.0f);
-      float qhi = e2m1_mag_to_float(nhi) * ((nhi & 0x8u) ? -1.0f : 1.0f);
-      float origlo, orighi;
+      // q.x = dequant(elt 2i), q.y = dequant(elt 2i+1).
+      float2 q = e2m1x2_to_float2(e2m1Vec >> (8 * i));
+      float2 o;
       if constexpr (std::is_same_v<Type, half>) {
-        float2 o = __half22float2(vec.elts[i]);
-        origlo = o.x;
-        orighi = o.y;
+        o = __half22float2(vec.elts[i]);
       } else {
-        float2 o = __bfloat1622float2(vec.elts[i]);
-        origlo = o.x;
-        orighi = o.y;
+        o = __bfloat1622float2(vec.elts[i]);
       }
-      float reslo = origlo - qlo * totalScale;
-      float reshi = orighi - qhi * totalScale;
+      float reslo = o.x - q.x * totalScale;
+      float reshi = o.y - q.y * totalScale;
       if constexpr (std::is_same_v<Type, half>) {
         residual->elts[i] = __floats2half2_rn(reslo, reshi);
       } else {
