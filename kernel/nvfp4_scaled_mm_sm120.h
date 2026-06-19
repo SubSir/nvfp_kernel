@@ -1,6 +1,7 @@
 #pragma once
 
-#define ENABLE_NVFP4_SM120 1
+// ENABLE_NVFP4_SM100 / ENABLE_NVFP4_SM120 are provided by the build (setup.py)
+// based on the target architecture; do not force them here.
 #if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
 void cutlass_scaled_fp4_mm_sm100a(torch::Tensor& D, torch::Tensor const& A,
                                   torch::Tensor const& B,
