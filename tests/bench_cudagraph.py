@@ -58,9 +58,13 @@ def main():
         w_q, w_sf = scaled_fp4_quant(w, w_gs)
 
         print(f"\n## {name}  (K={K}, N={N})  [CUDA graph replay]")
-        print(f"{'M':>5} {'bf16':>9} {'fp4':>9} {'resid':>9} "
-              f"{'bf16/fp4':>9} {'bf16/res':>9}")
-        print("-" * 60)
+        print(f"  latency (ms){'':>22} | throughput (Mtok/s){'':>9} | "
+              f"useful TFLOPS")
+        print(f"{'M':>5} {'bf16':>8} {'fp4':>8} {'resid':>8} "
+              f"{'bf/fp4':>7} {'bf/res':>7} | "
+              f"{'bf16':>6} {'fp4':>6} {'resid':>6} | "
+              f"{'bf16':>6} {'fp4':>6} {'resid':>6}")
+        print("-" * 104)
         for M in MS:
             # Static input buffers (filled once; graph replays over them).
             a = torch.randn(M, K, dtype=torch.bfloat16, device=dev) * 0.5
@@ -83,8 +87,16 @@ def main():
                 tb = graph_bench(run_bf16)
                 tf = graph_bench(run_fp4)
                 tr = graph_bench(run_resid)
-                print(f"{M:>5} {tb:>9.5f} {tf:>9.5f} {tr:>9.5f} "
-                      f"{tb / tf:>8.2f}x {tb / tr:>8.2f}x")
+                # throughput: M useful tokens per second (ms -> Mtok/s)
+                thr = lambda t: M / t / 1e3  # M tokens / (t ms) -> Mtok/s
+                # useful FLOPs = one M-token GEMM (residual's 2nd pass refines,
+                # it does not produce extra tokens) -> compare apples to apples.
+                flop = 2.0 * M * K * N
+                tflops = lambda t: flop / (t * 1e-3) / 1e12
+                print(f"{M:>5} {tb:>8.5f} {tf:>8.5f} {tr:>8.5f} "
+                      f"{tb / tf:>6.2f}x {tb / tr:>6.2f}x | "
+                      f"{thr(tb):>6.1f} {thr(tf):>6.1f} {thr(tr):>6.1f} | "
+                      f"{tflops(tb):>6.1f} {tflops(tf):>6.1f} {tflops(tr):>6.1f}")
             except Exception as ex:  # pragma: no cover
                 print(f"{M:>5}  graph capture failed: {type(ex).__name__}: {ex}")
                 return
