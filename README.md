@@ -50,15 +50,21 @@ quant error, leaving the single-level *weight* fp4 error as the floor:
 **Speed** — pure FP4 GEMM at `M` vs `2M` rows (activations pre-quantized), i.e.
 the cost of doubling tokens:
 
-| M (decode) | `gemm(2M) / gemm(M)` |
-|---|---|
-| 1 – 64 | **≈ 1.0× (free)** |
-| 256 | ≈ 1.1 – 1.4× |
-| 1024 | ≈ 1.4 – 1.8× (→ compute-bound 2×) |
+| M (decode) | `gemm(2M) / gemm(M)` | why |
+|---|---|---|
+| ≤ 64 | **≈ 0.85 – 1.0× (free)** | `2M ≤ 128` rides in the padded 128-row tile |
+| 72 – 128 | ≈ 1.1 – 1.5× | CTA grid doubles, still ~1 SM-wave |
+| ≥ 192 | ≈ 1.45 – 1.6× → 2× | grid spills past a wave / compute-bound |
 
-So in the decode regime (`M ≲ 64`) the second NVFP4 level is **free at the GEMM
-level**; the full residual path costs only ~1.12× over single-level fp4 (the
-extra residual-quant + output-add).
+Caveat (see `tests/bench_mpad.py`): the "free" at `M ≤ 64` is an
+**under-utilization artifact**, not a memory-bandwidth effect. The GEMM pads M to
+a 128-row CTA tile, so a small decode batch leaves those tensor-core rows idle
+and the residual simply fills them. The real ~2× doubling cost appears once
+`2M > 128` and the doubled CTA grid (`ceil(2M/128) × ceil(N/128)`) exceeds one
+SM wave (~148 CTAs on B200). So residual is genuinely free only for batches that
+underfill the tile; for larger batches it trends to the expected 2× GEMM cost.
+The full residual path adds ~1.12× over single-level fp4 from the residual-quant
++ output-add on top of whatever the GEMM ratio is.
 
 ### FP4 vs bf16 — the crossover
 
