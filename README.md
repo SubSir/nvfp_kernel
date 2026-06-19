@@ -60,11 +60,32 @@ So in the decode regime (`M ≲ 64`) the second NVFP4 level is **free at the GEM
 level**; the full residual path costs only ~1.12× over single-level fp4 (the
 extra residual-quant + output-add).
 
-> Caveat: at these small per-layer decode shapes the FP4 GEMM is
-> launch/overhead-bound (~0.076 ms floor), so absolute FP4 latency exceeds
-> cuBLAS bf16 here. That is orthogonal to the residual technique (it is a fixed
-> per-call cost — reducible with CUDA graphs / a persistent workspace) and
-> matches the original repo's finding that FP4 wins only at larger sizes.
+### FP4 vs bf16 — the crossover
+
+At small decode shapes the FP4 GEMM sits on a ~0.05 ms host launch/overhead floor,
+so **measured per-call in isolation** FP4 only beats cuBLAS bf16 once the matmul
+is big enough that bf16 exceeds that floor:
+
+| shape | single FP4 ≥ bf16 from (no graph) |
+|---|---|
+| qkv_proj / o_proj | M ≈ 2048 |
+| moe_gate_up | M ≈ 4096 |
+| moe_down | M ≈ 8192 |
+
+That floor is launch overhead, not the GEMM. **With CUDA graphs** (how serving
+actually runs — launch amortized) the picture flips: FP4 reads 4× fewer weight
+bytes than bf16, so it wins in the memory-bound decode regime:
+
+| shape | FP4 vs bf16 @ M=1 | residual vs bf16 @ M=1 |
+|---|---|---|
+| qkv_proj (6144×9216) | 1.6× faster | 1.3× faster |
+| o_proj (8192×6144) | ~par | ~par |
+| moe_gate_up / moe_down | ~par (FP4 ahead by M≈16–64) | ~0.8–0.9× |
+
+So for the big projections, residual FP4 is **faster than bf16 while also more
+accurate than single-level FP4** — the doubled tokens stay under bf16 latency
+because the weight (4× smaller) dominates traffic. See
+`tests/bench_crossover.py` (per-call) and `tests/bench_cudagraph.py` (graphed).
 
 ## API
 
