@@ -11,7 +11,11 @@ Conventions
 
 import torch
 
-from .ops import scaled_fp4_quant, cutlass_scaled_fp4_mm
+from .ops import (
+    scaled_fp4_quant,
+    scaled_fp4_quant_residual,
+    cutlass_scaled_fp4_mm,
+)
 
 FLOAT4_E2M1_MAX = 6.0
 FLOAT8_E4M3_MAX = 448.0
@@ -44,3 +48,35 @@ def fp4_gemm(
     b_q, b_sf, b_gs = quantize_fp4(b, b_gs)
     alpha = (1.0 / (a_gs * b_gs)).to(torch.float32)
     return cutlass_scaled_fp4_mm(a_q, b_q, a_sf, b_sf, alpha, out_dtype)
+
+
+def residual_fp4_gemm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+    a_gs: torch.Tensor | None = None,
+    b_gs: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Residual W4A4 GEMM: doubles activation tokens to recover ~2 NVFP4 levels.
+
+    Quantizes the activation ``a`` to two stacked NVFP4 levels (value + residual)
+    sharing one global scale, runs a single (2M x N) FP4 GEMM against the
+    single-level weight, then sums the two halves of the output:
+
+        out = NVFP4(a) @ W.T + NVFP4(a - dequant(NVFP4(a))) @ W.T
+
+    Memory traffic for ``W`` is unchanged (it is streamed once), so in the
+    memory-bound decode regime the extra GEMM rows are ~free while activation
+    precision improves from ~fp4 to ~fp7/8.
+    """
+    M = a.shape[0]
+    # Stacked two-level activation: (2M, K/2) fp4 + (2M-rounded) swizzled scales.
+    if a_gs is None:
+        a_gs = global_scale(a)
+    a_q, a_sf = scaled_fp4_quant_residual(a, a_gs)
+
+    b_q, b_sf, b_gs = quantize_fp4(b, b_gs)
+    alpha = (1.0 / (a_gs * b_gs)).to(torch.float32)
+
+    out2 = cutlass_scaled_fp4_mm(a_q, b_q, a_sf, b_sf, alpha, out_dtype)  # (2M, N)
+    return out2[:M] + out2[M:]

@@ -64,6 +64,43 @@ template void invokeFP4Quantization(int m, int n, __nv_bfloat16 const* input,
                                     int32_t* SFOuput, bool useUE8M0,
                                     int multiProcessorCount,
                                     cudaStream_t stream);
+
+// Fused two-level (residual) NVFP4 quantization. `output`/`SFOutput` must be
+// sized for 2*m rows (rows [0,m) = NVFP4(x), rows [m,2m) = NVFP4(residual)).
+template <typename T>
+void invokeFP4QuantizationResidual(int m, int n, T const* input,
+                                   float const* SFScale, int64_t* output,
+                                   int32_t* SFOuput, bool useUE8M0,
+                                   int multiProcessorCount,
+                                   cudaStream_t stream) {
+  dim3 block(std::min(int(n / ELTS_PER_THREAD), 512));
+  int const numBlocksPerSM =
+      vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
+  // One block handles one input row (and produces both NVFP4 levels for it).
+  dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
+
+  if (useUE8M0) {
+    cvt_fp16_to_fp4_residual<T, true><<<grid, block, 0, stream>>>(
+        m, n, input, SFScale, reinterpret_cast<uint32_t*>(output),
+        reinterpret_cast<uint32_t*>(SFOuput));
+  } else {
+    cvt_fp16_to_fp4_residual<T, false><<<grid, block, 0, stream>>>(
+        m, n, input, SFScale, reinterpret_cast<uint32_t*>(output),
+        reinterpret_cast<uint32_t*>(SFOuput));
+  }
+}
+
+template void invokeFP4QuantizationResidual(int m, int n, half const* input,
+                                            float const* SFScale,
+                                            int64_t* output, int32_t* SFOuput,
+                                            bool useUE8M0,
+                                            int multiProcessorCount,
+                                            cudaStream_t stream);
+
+template void invokeFP4QuantizationResidual(
+    int m, int n, __nv_bfloat16 const* input, float const* SFScale,
+    int64_t* output, int32_t* SFOuput, bool useUE8M0, int multiProcessorCount,
+    cudaStream_t stream);
 }  // namespace vllm
 
 void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
@@ -96,4 +133,42 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
     vllm::invokeFP4Quantization(m, n, input_ptr, input_sf_ptr, output_ptr,
                                 sf_out, useUE8M0, multiProcessorCount, stream);
   });
+}
+
+// Fused two-level (residual) NVFP4 quantization.
+//   input    : (m, n) fp16/bf16
+//   output   : (2m, n/2) uint8 packed  -- rows [0,m)=NVFP4(x), [m,2m)=NVFP4(res)
+//   output_sf: swizzled scales sized for round_up(2m,128) rows
+//   input_sf : scalar fp32 global scale (shared by both levels)
+void scaled_fp4_quant_residual_sm1xxa(torch::Tensor const& output,
+                                      torch::Tensor const& input,
+                                      torch::Tensor const& output_sf,
+                                      torch::Tensor const& input_sf) {
+  int32_t m = input.size(0);
+  int32_t n = input.size(1);
+
+  TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
+  TORCH_CHECK(input.scalar_type() == at::ScalarType::Half ||
+                  input.scalar_type() == at::ScalarType::BFloat16,
+              "Unsupported input data type for quantize_to_fp4.");
+
+  int multiProcessorCount =
+      get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
+
+  auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());
+  auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
+  auto output_ptr = static_cast<int64_t*>(output.data_ptr());
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
+
+  bool useUE8M0 = false;
+
+  VLLM_DISPATCH_HALF_TYPES(
+      input.scalar_type(), "nvfp4_quant_residual_kernel", [&] {
+        using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
+        auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
+        vllm::invokeFP4QuantizationResidual(m, n, input_ptr, input_sf_ptr,
+                                            output_ptr, sf_out, useUE8M0,
+                                            multiProcessorCount, stream);
+      });
 }

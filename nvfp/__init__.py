@@ -1,11 +1,18 @@
-from .ops import scaled_fp4_quant, cutlass_scaled_fp4_mm, reciprocal_approximate_ftz_tensor
-from .fp4_gemm import fp4_gemm, quantize_fp4, global_scale
+from .ops import (
+    scaled_fp4_quant,
+    scaled_fp4_quant_residual,
+    cutlass_scaled_fp4_mm,
+    reciprocal_approximate_ftz_tensor,
+)
+from .fp4_gemm import fp4_gemm, residual_fp4_gemm, quantize_fp4, global_scale
 
 __all__ = [
     "scaled_fp4_quant",
+    "scaled_fp4_quant_residual",
     "cutlass_scaled_fp4_mm",
     "reciprocal_approximate_ftz_tensor",
     "fp4_gemm",
+    "residual_fp4_gemm",
     "quantize_fp4",
     "global_scale",
 ]

@@ -241,6 +241,156 @@ __device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal,
   return e2m1Vec;
 }
 
+// Decode the magnitude of one e2m1 nibble (low 3 bits) to float.
+// e2m1 magnitudes: {0, 0.5, 1, 1.5, 2, 3, 4, 6}.
+inline __device__ float e2m1_mag_to_float(uint32_t idx) {
+  switch (idx & 0x7u) {
+    case 0: return 0.0f;
+    case 1: return 0.5f;
+    case 2: return 1.0f;
+    case 3: return 1.5f;
+    case 4: return 2.0f;
+    case 5: return 3.0f;
+    case 6: return 4.0f;
+    default: return 6.0f;
+  }
+}
+
+// Same as cvt_warp_fp16_to_fp4, but additionally returns the quantization
+// residual (original - dequant(quantized)) in `residual` (in the input dtype),
+// so a second NVFP4 level can be applied. `residual` may be null. The residual
+// is computed by decoding the exact e2m1 codes this function emits, so it
+// matches bit-for-bit what the downstream GEMM consumes.
+template <class Type, bool UE8M0_SF = false>
+__device__ uint32_t cvt_warp_fp16_to_fp4_residual(PackedVec<Type>& vec,
+                                                  float SFScaleVal,
+                                                  uint8_t* SFout,
+                                                  PackedVec<Type>* residual) {
+  auto localMax = __habs2(vec.elts[0]);
+#pragma unroll
+  for (int i = 1; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
+    localMax = __hmax2(localMax, __habs2(vec.elts[i]));
+  }
+  localMax = __hmax2(__shfl_xor_sync(uint32_t(-1), localMax, 1), localMax);
+  float vecMax;
+  if constexpr (std::is_same_v<Type, __half>) {
+    vecMax = __half2float(__hmax(localMax.x, localMax.y));
+  } else {
+    static_assert(std::is_same_v<Type, __nv_bfloat16>, "Unsupported type");
+    vecMax = __bfloat162float(__hmax(localMax.x, localMax.y));
+  }
+
+  float SFValue = SFScaleVal * (vecMax * reciprocal_approximate_ftz(6.0f));
+  uint8_t fp8SFVal;
+  if constexpr (UE8M0_SF) {
+    uint32_t tmp = reinterpret_cast<uint32_t&>(SFValue) >> 23;
+    fp8SFVal = tmp & 0xff;
+    reinterpret_cast<uint32_t&>(SFValue) = tmp << 23;
+  } else {
+    __nv_fp8_e4m3 tmp = __nv_fp8_e4m3(SFValue);
+    reinterpret_cast<__nv_fp8_e4m3&>(fp8SFVal) = tmp;
+    SFValue = float(tmp);
+  }
+  // outputScale maps original units -> e2m1 grid; totalScale is its inverse,
+  // i.e. e2m1 grid value -> original units (== stored_block_scale / globalScale).
+  float outputScale =
+      SFValue != 0 ? reciprocal_approximate_ftz(
+                         SFValue * reciprocal_approximate_ftz(SFScaleVal))
+                   : 0.0f;
+  float totalScale = SFValue * reciprocal_approximate_ftz(SFScaleVal);
+
+  if (SFout) {
+    *SFout = fp8SFVal;
+  }
+
+  float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD / 2];
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
+    if constexpr (std::is_same_v<Type, half>) {
+      fp2Vals[i] = __half22float2(vec.elts[i]);
+    } else {
+      fp2Vals[i] = __bfloat1622float2(vec.elts[i]);
+    }
+    fp2Vals[i].x *= outputScale;
+    fp2Vals[i].y *= outputScale;
+  }
+  uint32_t e2m1Vec = fp32_vec_to_e2m1(fp2Vals);
+
+  if (residual != nullptr) {
+#pragma unroll
+    for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
+      // byte i of e2m1Vec packs element 2i (low nibble) and 2i+1 (high nibble).
+      uint32_t nlo = (e2m1Vec >> (8 * i)) & 0xFu;
+      uint32_t nhi = (e2m1Vec >> (8 * i + 4)) & 0xFu;
+      float qlo = e2m1_mag_to_float(nlo) * ((nlo & 0x8u) ? -1.0f : 1.0f);
+      float qhi = e2m1_mag_to_float(nhi) * ((nhi & 0x8u) ? -1.0f : 1.0f);
+      float origlo, orighi;
+      if constexpr (std::is_same_v<Type, half>) {
+        float2 o = __half22float2(vec.elts[i]);
+        origlo = o.x;
+        orighi = o.y;
+      } else {
+        float2 o = __bfloat1622float2(vec.elts[i]);
+        origlo = o.x;
+        orighi = o.y;
+      }
+      float reslo = origlo - qlo * totalScale;
+      float reshi = orighi - qhi * totalScale;
+      if constexpr (std::is_same_v<Type, half>) {
+        residual->elts[i] = __floats2half2_rn(reslo, reshi);
+      } else {
+        residual->elts[i] = __floats2bfloat162_rn(reslo, reshi);
+      }
+    }
+  }
+  return e2m1Vec;
+}
+
+// Fused two-level (residual) NVFP4 quantization.
+// Reads x once (numRows x numCols) and writes a stacked (2*numRows x numCols)
+// FP4 tensor: rows [0, numRows)        = NVFP4(x)
+//             rows [numRows, 2*numRows) = NVFP4(x - dequant(NVFP4(x)))
+// Both levels share the SAME global scale (SFScale), so the downstream GEMM can
+// treat the result as one (2*numRows x numCols) matrix with a single alpha.
+template <class Type, bool UE8M0_SF = false>
+__global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
+    cvt_fp16_to_fp4_residual(int32_t numRows, int32_t numCols, Type const* in,
+                             float const* SFScale, uint32_t* out,
+                             uint32_t* SFout) {
+  using PackedVec = PackedVec<Type>;
+  static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
+      (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
+  static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
+                "Vec size is not matched.");
+
+  float const SFScaleVal = SFScale == nullptr ? 1.0f : SFScale[0];
+  int const colsPacked = numCols / CVT_FP4_ELTS_PER_THREAD;
+
+  for (int rowIdx = blockIdx.x; rowIdx < numRows; rowIdx += gridDim.x) {
+    for (int colIdx = threadIdx.x; colIdx < colsPacked; colIdx += blockDim.x) {
+      int64_t inOffset = static_cast<int64_t>(rowIdx) * colsPacked + colIdx;
+      PackedVec in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
+
+      // Level 1: quantize x into row `rowIdx`, capturing the residual.
+      auto sf_x = cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
+                                                     CVT_FP4_NUM_THREADS_PER_SF>(
+          rowIdx, colIdx, numCols, SFout);
+      PackedVec residual;
+      out[inOffset] = cvt_warp_fp16_to_fp4_residual<Type, UE8M0_SF>(
+          in_vec, SFScaleVal, sf_x, &residual);
+
+      // Level 2: quantize the residual into row `numRows + rowIdx`.
+      int const rRow = numRows + rowIdx;
+      int64_t const rOffset = static_cast<int64_t>(rRow) * colsPacked + colIdx;
+      auto sf_r = cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
+                                                     CVT_FP4_NUM_THREADS_PER_SF>(
+          rRow, colIdx, numCols, SFout);
+      out[rOffset] = cvt_warp_fp16_to_fp4_residual<Type, UE8M0_SF>(
+          residual, SFScaleVal, sf_r, nullptr);
+    }
+  }
+}
+
 // Use UE4M3 by default.
 template <class Type, bool UE8M0_SF = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))

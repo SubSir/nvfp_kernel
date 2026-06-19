@@ -5,3 +5,8 @@ void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
                              torch::Tensor const& input_sf);
+
+void scaled_fp4_quant_residual_sm1xxa(torch::Tensor const& output,
+                                      torch::Tensor const& input,
+                                      torch::Tensor const& output_sf,
+                                      torch::Tensor const& input_sf);

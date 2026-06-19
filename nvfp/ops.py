@@ -60,6 +60,57 @@ def scaled_fp4_quant(
     return output, output_scale
 
 
+def scaled_fp4_quant_residual(
+    input: torch.Tensor, input_global_scale: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused two-level (residual) NVFP4 quantization.
+
+    Quantizes ``input`` (M, K) to NVFP4, then quantizes the residual
+    ``input - dequant(NVFP4(input))`` to a second NVFP4 level using the SAME
+    global scale, and stacks both along the row dimension.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]:
+            * packed FP4 tensor of shape (2M, K//2), uint8 -- rows [0, M) are
+              NVFP4(input) and rows [M, 2M) are NVFP4(residual);
+            * float8_e4m3 block scales in swizzled layout, padded for 2M rows.
+    """
+    assert input.is_cuda, "input must be a CUDA tensor"
+    assert input_global_scale.is_cuda, "input_global_scale must be a CUDA tensor"
+    assert input.ndim >= 1, f"input.ndim needs to be >= 1, but got {input.ndim}."
+    other_dims = 1 if input.ndim == 1 else -1
+    input = input.reshape(other_dims, input.shape[-1])
+    m, n = input.shape
+    block_size = 16
+    device = input.device
+
+    assert n % block_size == 0, f"last dim has to be multiple of 16, but got {n}."
+    assert input.dtype in (
+        torch.float16,
+        torch.bfloat16,
+    ), f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
+    assert input_global_scale.dtype == torch.float, (
+        f"input_global_scale.dtype needs to be fp32 but got {input_global_scale.dtype}."
+    )
+
+    # Stacked output: rows [0, m) = NVFP4(x), rows [m, 2m) = NVFP4(residual).
+    output = torch.empty((2 * m, n // 2), device=device, dtype=torch.uint8)
+
+    round_up = lambda x, y: (x + y - 1) // y * y
+    rounded_m = round_up(2 * m, 128)
+    scale_n = n // block_size
+    rounded_n = round_up(scale_n, 4)
+    output_scale = torch.empty(
+        (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+    )
+
+    scaled_fp4_ops.scaled_fp4_quant_residual_sm1xxa(
+        output, input, output_scale, input_global_scale
+    )
+    output_scale = output_scale.view(torch.float8_e4m3fn)
+    return output, output_scale
+
+
 def cutlass_scaled_fp4_mm(
     a: torch.Tensor,
     b: torch.Tensor,
