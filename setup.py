@@ -25,9 +25,20 @@ try:
     extra_compile_args = {}
 
     if build_profile == "real":
-        sources = [
-            os.path.join(current_dir, "binding.cpp"),
-            *sorted(glob.glob(os.path.join(current_dir, "kernel", "*.cu"))),
+        # NVFP_SM selects the GEMM arch: "120" (RTX 5090, default) or "100" (B200/GB200).
+        # Only one arch's mm-kernel .cu compiles at a time (each needs its own -gencode);
+        # the other is excluded so ptxas doesn't try to build it for the wrong target.
+        nvfp_sm = os.getenv("NVFP_SM", "120").strip()
+        all_cu = sorted(glob.glob(os.path.join(current_dir, "kernel", "*.cu")))
+        if nvfp_sm == "100":
+            other_arch_tag = "sm120"
+            gencode = "-gencode=arch=compute_100a,code=sm_100a"
+            define_macros.append(("ENABLE_NVFP4_SM100", "1"))
+        else:
+            other_arch_tag = "sm100"
+            gencode = "-gencode=arch=compute_120a,code=sm_120a"
+        sources = [os.path.join(current_dir, "binding.cpp")] + [
+            f for f in all_cu if other_arch_tag not in os.path.basename(f)
         ]
         include_dirs.extend(
             [
@@ -43,7 +54,7 @@ try:
             "nvcc": [
                 "-O3",
                 "--use_fast_math",
-                "-gencode=arch=compute_120a,code=sm_120a",
+                gencode,
             ],
         }
     else:
